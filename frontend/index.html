@@ -1,13 +1,21 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 
 <head>
     <meta charset="utf-8">
-    <meta name="description" content="Jq Play Ground is a web assembly
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Jq Playground is a web assembly
 version of jqplay, allowing you to run the full featured
 jq in your browser, without sending anything to any backend.">
     <link rel="icon" type="image/png" href="favicon.png">
     <title>Jq Playground</title>
+    <script>
+      (function () {
+        var t = localStorage.getItem('theme');
+        if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches))
+          document.documentElement.classList.add('dark');
+      })();
+    </script>
     <script>
       if('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/jq_offline/service_worker.js', { scope: '/jq_offline' })
@@ -39,18 +47,9 @@ jq in your browser, without sending anything to any backend.">
       let monacoFilterEditor;
       let monacoOutputEditor;
       let CLI;
-      let isDarkMode = true; // Default to dark mode
+      let isDarkMode = document.documentElement.classList.contains('dark');
 
       async function setup() {
-        // Check for saved theme preference
-        const savedTheme = localStorage.getItem('theme');
-        if (savedTheme === 'light') {
-          isDarkMode = false;
-          document.getElementById('dark-icon').style.display = 'none';
-          document.getElementById('light-icon').style.display = 'inline';
-          document.documentElement.setAttribute('data-theme', 'light');
-        }
-        
         // Populate the form from the url parameters
         let params = (new URL(document.location)).searchParams;
 
@@ -125,8 +124,9 @@ jq in your browser, without sending anything to any backend.">
             scrollBeyondLastLine: false,
             wordWrap: 'on',
             automaticLayout: true,
-            theme: isDarkMode ? 'vs-dark' : 'vs-light',
+            theme: isDarkMode ? 'vs-dark' : 'vs',
             fontSize: 14,
+            padding: { top: 12, bottom: 12 },
             scrollbar: {
               vertical: 'hidden',
               horizontal: 'hidden'
@@ -165,8 +165,9 @@ jq in your browser, without sending anything to any backend.">
             language: 'json',
             minimap: { enabled: true },
             automaticLayout: true,
-            theme: isDarkMode ? 'vs-dark' : 'vs-light',
-            fontSize: 14
+            theme: isDarkMode ? 'vs-dark' : 'vs',
+            fontSize: 14,
+            padding: { top: 8, bottom: 8 }
           });
 
           // Output JSON editor (read-only)
@@ -176,8 +177,9 @@ jq in your browser, without sending anything to any backend.">
             minimap: { enabled: true },
             readOnly: true,
             automaticLayout: true,
-            theme: isDarkMode ? 'vs-dark' : 'vs-light',
-            fontSize: 14
+            theme: isDarkMode ? 'vs-dark' : 'vs',
+            fontSize: 14,
+            padding: { top: 8, bottom: 8 }
           });
 
           // Add event listeners
@@ -202,19 +204,13 @@ jq in your browser, without sending anything to any backend.">
       // Function to toggle between dark and light themes
       function toggleTheme() {
         isDarkMode = !isDarkMode;
-        const theme = isDarkMode ? 'vs-dark' : 'vs-light';
+        const theme = isDarkMode ? 'vs-dark' : 'vs';
         
         // Update editor themes
-        monacoFilterEditor.updateOptions({ theme });
-        monacoInputEditor.updateOptions({ theme });
-        monacoOutputEditor.updateOptions({ theme });
-        
-        // Update toggle button icons
-        document.getElementById('dark-icon').style.display = isDarkMode ? 'inline' : 'none';
-        document.getElementById('light-icon').style.display = isDarkMode ? 'none' : 'inline';
+        monaco.editor.setTheme(theme);
         
         // Update document theme
-        document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+        document.documentElement.classList.toggle('dark', isDarkMode);
         
         // Save preference
         localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
@@ -247,63 +243,94 @@ jq in your browser, without sending anything to any backend.">
 </head>
 
 <body>
-    <div id="top">
-        <h1><span class="title-icon">⚙️</span> Jq Play<span class="title-highlight">Ground</span></h1>
-        <div id="links">
-          <a href="https://jqlang.github.io/jq/manual/v1.7/" target="_blank">Manual (jq 1.7)</a>
-          <button id="theme-toggle" title="Toggle dark/light mode">
-            <span id="dark-icon">🌙</span>
-            <span id="light-icon" style="display: none;">☀️</span>
-          </button>
-        </div>
-    </div>
-    <div id="content">
-        <div id="query">
-            <label id="filter-label" for="filter-container">Query</label>
-            <div id="filter-wrapper">
-                <div id="filter-container"></div>
-                <button id="options-toggle" title="Show/Hide Options">
-                    <span class="options-icon">⚙️</span>
+    <div class="app">
+        <header class="topbar">
+            <div class="logo" aria-hidden="true">jq</div>
+            <div class="brand">
+                <h1>Jq Playground</h1>
+                <p>Full jq in your browser — nothing leaves this tab</p>
+            </div>
+            <div class="topbar-actions">
+                <a class="btn ghost" href="https://jqlang.github.io/jq/manual/v1.7/" target="_blank" rel="noopener">
+                    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M14 3h7v7"/>
+                        <path d="M10 14L21 3"/>
+                        <path d="M21 14v7H3V3h7"/>
+                    </svg>
+                    <span>Manual</span>
+                </a>
+                <button id="theme-toggle" class="icon-btn" title="Toggle dark/light mode" aria-label="Toggle theme">
+                    <svg class="sun" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="12" cy="12" r="4"/>
+                        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+                    </svg>
+                    <svg class="moon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M21 14.5A8.5 8.5 0 0 1 9.5 3 7 7 0 1 0 21 14.5z"/>
+                    </svg>
                 </button>
             </div>
-            <div id="options-popover" class="hidden">
-                <div class="popover-header">
-                    <p>Options</p>
-                    <button id="close-options" title="Close Options">✕</button>
+        </header>
+
+        <div id="content">
+            <div id="query" class="panel">
+                <div class="panel-label">
+                    Query
+                    <span class="hint">jq filter</span>
                 </div>
-                <ul id="options">
-                  <li>
-                    <input type="checkbox" id="compact-output" name="co">
-                    <label for="compact-output" title="By default, jq pretty-prints JSON output. Using this option will result in more compact output by instead putting each JSON object on a single line.">--compact-output</label>
-                  </li>
-                  <li>
-                    <input type="checkbox" id="sort-keys" name="sk">
-                    <label for="sort-keys" title="Output the fields of each object with the keys in sorted order.">--sort-key</label>
-                  </li>
-                  <li>
-                    <input type="checkbox" id="raw-input" name="ri">
-                    <label for="raw-input" title="Don't parse the input as JSON. Instead, each line of text is passed to the filter as a string. If combined with --slurp, then the entire input is passed to the filter as a single long string.">--raw-input</label>
-                  </li>
-                  <li>
-                    <input type="checkbox" id="raw-output" name="ro">
-                    <label for="raw-output" title="With this option, if the filter's result is a string then it will be written directly to standard output rather than being formatted as a JSON string with quotes. This can be useful for making jq filters talk to non-JSON-based systems.">--raw-output</label>
-                  </li>
-                  <li>
-                    <input type="checkbox" id="slurp" name="s">
-                    <label for="slurp" title="Instead of running the filter for each JSON object in the input, read the entire input stream into a large array and run the filter just once.">--slurp</label>
-                  </li>
-                </ul>
+                <div id="filter-wrapper">
+                    <div id="filter-container"></div>
+                    <button id="options-toggle" title="Show/Hide Options" aria-label="Options">
+                        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="options-popover" class="hidden">
+                    <div class="popover-header">
+                        <p>Options</p>
+                        <button id="close-options" title="Close Options" aria-label="Close options">✕</button>
+                    </div>
+                    <ul id="options">
+                      <li>
+                        <input type="checkbox" id="compact-output" name="co">
+                        <label for="compact-output" title="By default, jq pretty-prints JSON output. Using this option will result in more compact output by instead putting each JSON object on a single line.">--compact-output</label>
+                      </li>
+                      <li>
+                        <input type="checkbox" id="sort-keys" name="sk">
+                        <label for="sort-keys" title="Output the fields of each object with the keys in sorted order.">--sort-key</label>
+                      </li>
+                      <li>
+                        <input type="checkbox" id="raw-input" name="ri">
+                        <label for="raw-input" title="Don't parse the input as JSON. Instead, each line of text is passed to the filter as a string. If combined with --slurp, then the entire input is passed to the filter as a single long string.">--raw-input</label>
+                      </li>
+                      <li>
+                        <input type="checkbox" id="raw-output" name="ro">
+                        <label for="raw-output" title="With this option, if the filter's result is a string then it will be written directly to standard output rather than being formatted as a JSON string with quotes. This can be useful for making jq filters talk to non-JSON-based systems.">--raw-output</label>
+                      </li>
+                      <li>
+                        <input type="checkbox" id="slurp" name="s">
+                        <label for="slurp" title="Instead of running the filter for each JSON object in the input, read the entire input stream into a large array and run the filter just once.">--slurp</label>
+                      </li>
+                    </ul>
+                </div>
             </div>
-        </div>
 
-        <div id="input">
-            <label id="input-label" for="input-json-container">Input</label>
-            <div id="input-json-container"></div>
-        </div>
+            <div id="input" class="panel">
+                <div class="panel-label">
+                    Input
+                    <span class="hint">JSON</span>
+                </div>
+                <div id="input-json-container"></div>
+            </div>
 
-        <div id="output">
-            <label id="output-label" for="output-json-container">Result</label>
-            <div id="output-json-container"></div>
+            <div id="output" class="panel">
+                <div class="panel-label">
+                    Result
+                    <span class="hint">output</span>
+                </div>
+                <div id="output-json-container"></div>
+            </div>
         </div>
     </div>
 </body>
