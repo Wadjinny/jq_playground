@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="description" content="Jq Play Ground is a web assembly
+version of jqplay, allowing you to run the full featured
+jq in your browser, without sending anything to any backend.">
+    <link rel="icon" type="image/png" href="favicon.png">
+    <title>Jq Playground</title>
+    <script>
+      if('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/jq_offline/service_worker.js', { scope: '/jq_offline' })
+          .then(function(registration) {
+                console.log('Service Worker Registered');
+          })
+          .catch(e => {
+            console.log('Unable to register service worker', e);
+          });
+
+        navigator.serviceWorker.ready.then(function(registration) {
+           console.log('Service Worker Ready');
+        })
+        .catch(e => {
+          console.log('Service worker unable to get ready', e);
+        });
+      }
+    </script>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://biowasm.com/cdn/v3/aioli.js"></script>
+    <!-- Monaco Editor Loader -->
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.43.0/min/vs/loader.js"></script>
+    <script>
+      // Monaco Editor configuration
+      require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.43.0/min/vs' }});
+    </script>
+    <script defer type="module">
+      let monacoInputEditor;
+      let monacoFilterEditor;
+      let monacoOutputEditor;
+      let CLI;
+      let isDarkMode = true; // Default to dark mode
+
+      async function setup() {
+        // Check for saved theme preference
+        const savedTheme = localStorage.getItem('theme');
+        if (savedTheme === 'light') {
+          isDarkMode = false;
+          document.getElementById('dark-icon').style.display = 'none';
+          document.getElementById('light-icon').style.display = 'inline';
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+        
+        // Populate the form from the url parameters
+        let params = (new URL(document.location)).searchParams;
+
+        let query = params.get('query');
+        if (query) {
+          // Store query to set in Monaco editor after initialization
+          window.initialQuery = query;
+        }
+        ['compact-output', 'sort-keys', 'raw-input', 'raw-output', 'slurp'].forEach(option => {
+          let p = params.get(option);
+          if (p === 'true') {
+            document.getElementById(option).checked = true;
+          }
+        });
+      }
+
+      async function jq() {
+        let data = monacoInputEditor.getValue();
+        let query = monacoFilterEditor.getValue();
+
+        let params = (new URL(document.location)).searchParams;
+        let options = ["--monochrome-output"];
+        ['compact-output', 'sort-keys', 'raw-input', 'raw-output', 'slurp'].forEach(option => {
+          let part = document.getElementById(option).checked;
+          if (part) {
+            params.set(option, true);
+            options.push('--' + option);
+          } else {
+            params.delete(option);
+          }
+        });
+
+        // Update url query params with current query
+        params.set('query', query);
+        const url = new URL(document.location);
+        url.search = params.toString();
+        window.history.replaceState({}, 'Jq Offline', url);
+
+        // Create mock JSON file
+        await CLI.fs.writeFile("test.json", data);
+
+        options.push(query);
+        options.push("test.json");
+
+        let output = await CLI.exec("jq", options);
+        monacoOutputEditor.setValue(output);
+      }
+
+      // buffer and call the callback only after no activity for "interval": aka debounce
+      // This reduces load on the browser by avoiding jq evaluation while the user is typing
+      function debounce(callback, interval) {
+        let debounceTimeoutId;
+
+        return function(...args) {
+          clearTimeout(debounceTimeoutId);
+          debounceTimeoutId = setTimeout(() => callback.apply(this, args), interval);
+        };
+      }
+
+      let delayedJq = debounce(jq, 400);
+
+      // Initialize Monaco editors after the page loads
+      async function initMonacoEditors() {
+        // Initialize Monaco editors
+        require(['vs/editor/editor.main'], function() {
+          // Filter editor (jq query)
+          monacoFilterEditor = monaco.editor.create(document.getElementById('filter-container'), {
+            value: window.initialQuery || '',
+            language: 'plaintext',
+            minimap: { enabled: false },
+            lineNumbers: 'off',
+            scrollBeyondLastLine: false,
+            wordWrap: 'on',
+            automaticLayout: true,
+            theme: isDarkMode ? 'vs-dark' : 'vs-light',
+            fontSize: 14,
+            scrollbar: {
+              vertical: 'hidden',
+              horizontal: 'hidden'
+            }
+          });
+
+          // Register a custom language for jq
+          monaco.languages.register({ id: 'jq' });
+          
+          // Define jq syntax highlighting
+          monaco.languages.setMonarchTokensProvider('jq', {
+            tokenizer: {
+              root: [
+                // Keywords
+                [/\b(if|then|else|elif|end|as|def|include|module|import|reduce|foreach|try|catch)\b/, 'keyword'],
+                // Operators
+                [/(\+|-|\*|\/|%|\||,|\.|;|:|\?|=|<|>|!)/, 'operator'],
+                // Numbers
+                [/\b\d+(\.\d+)?\b/, 'number'],
+                // Strings
+                [/"([^"\\]|\\.)*"/, 'string'],
+                // Comments
+                [/#.*$/, 'comment'],
+                // Functions
+                [/\b(map|select|has|contains|length|keys|to_entries|from_entries|with_entries|add|del|getpath|setpath|sort|sort_by|group_by|unique|unique_by|reverse|flatten|range|floor|ceil|round|sqrt|sin|cos|tan|asin|acos|atan|exp|log|pow|tonumber|tostring|type|join|split|sub|gsub|test|capture|scan|match|startswith|endswith|ltrimstr|rtrimstr|explode|implode|ascii_downcase|ascii_upcase|utf8bytelength|fromjson|tojson|format|strftime|strptime|now|gmtime|localtime|mktime|strflocaltime|strptime|todate|fromdate|todateiso8601|fromdateiso8601|todatejson|fromdatejson)\b/, 'function'],
+              ]
+            }
+          });
+          
+          // Set the language to jq
+          monaco.editor.setModelLanguage(monacoFilterEditor.getModel(), 'jq');
+
+          // Input JSON editor
+          monacoInputEditor = monaco.editor.create(document.getElementById('input-json-container'), {
+            value: '',
+            language: 'json',
+            minimap: { enabled: true },
+            automaticLayout: true,
+            theme: isDarkMode ? 'vs-dark' : 'vs-light',
+            fontSize: 14
+          });
+
+          // Output JSON editor (read-only)
+          monacoOutputEditor = monaco.editor.create(document.getElementById('output-json-container'), {
+            value: '',
+            language: 'json',
+            minimap: { enabled: true },
+            readOnly: true,
+            automaticLayout: true,
+            theme: isDarkMode ? 'vs-dark' : 'vs-light',
+            fontSize: 14
+          });
+
+          // Add event listeners
+          monacoFilterEditor.onDidChangeModelContent(delayedJq);
+          monacoInputEditor.onDidChangeModelContent(delayedJq);
+
+          // Add event listeners for checkboxes
+          document.getElementById("compact-output").addEventListener('input', jq);
+          document.getElementById("sort-keys").addEventListener('input', jq);
+          document.getElementById("raw-input").addEventListener('input', jq);
+          document.getElementById("raw-output").addEventListener('input', jq);
+          document.getElementById("slurp").addEventListener('input', jq);
+
+          // Call jq the first time
+          jq();
+          
+          // Set up theme toggle
+          document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+        });
+      }
+
+      // Function to toggle between dark and light themes
+      function toggleTheme() {
+        isDarkMode = !isDarkMode;
+        const theme = isDarkMode ? 'vs-dark' : 'vs-light';
+        
+        // Update editor themes
+        monacoFilterEditor.updateOptions({ theme });
+        monacoInputEditor.updateOptions({ theme });
+        monacoOutputEditor.updateOptions({ theme });
+        
+        // Update toggle button icons
+        document.getElementById('dark-icon').style.display = isDarkMode ? 'inline' : 'none';
+        document.getElementById('light-icon').style.display = isDarkMode ? 'none' : 'inline';
+        
+        // Update document theme
+        document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+        
+        // Save preference
+        localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
+      }
+
+      // Initialize everything
+      setup();
+      CLI = await new Aioli("jq/1.7");
+      await initMonacoEditors();
+      
+      // Set up options popover toggle
+      document.getElementById('options-toggle').addEventListener('click', function() {
+        document.getElementById('options-popover').classList.toggle('hidden');
+      });
+      
+      document.getElementById('close-options').addEventListener('click', function() {
+        document.getElementById('options-popover').classList.add('hidden');
+      });
+      
+      // Close popover when clicking outside
+      document.addEventListener('click', function(event) {
+        const popover = document.getElementById('options-popover');
+        const toggle = document.getElementById('options-toggle');
+        
+        if (!popover.contains(event.target) && event.target !== toggle && !toggle.contains(event.target)) {
+          popover.classList.add('hidden');
+        }
+      });
+    </script>
+</head>
+
+<body>
+    <div id="top">
+        <h1><span class="title-icon">⚙️</span> Jq Play<span class="title-highlight">Ground</span></h1>
+        <div id="links">
+          <a href="https://jqlang.github.io/jq/manual/v1.7/" target="_blank">Manual (jq 1.7)</a>
+          <button id="theme-toggle" title="Toggle dark/light mode">
+            <span id="dark-icon">🌙</span>
+            <span id="light-icon" style="display: none;">☀️</span>
+          </button>
+        </div>
+    </div>
+    <div id="content">
+        <div id="query">
+            <label id="filter-label" for="filter-container">Query</label>
+            <div id="filter-wrapper">
+                <div id="filter-container"></div>
+                <button id="options-toggle" title="Show/Hide Options">
+                    <span class="options-icon">⚙️</span>
+                </button>
+            </div>
+            <div id="options-popover" class="hidden">
+                <div class="popover-header">
+                    <p>Options</p>
+                    <button id="close-options" title="Close Options">✕</button>
+                </div>
+                <ul id="options">
+                  <li>
+                    <input type="checkbox" id="compact-output" name="co">
+                    <label for="compact-output" title="By default, jq pretty-prints JSON output. Using this option will result in more compact output by instead putting each JSON object on a single line.">--compact-output</label>
+                  </li>
+                  <li>
+                    <input type="checkbox" id="sort-keys" name="sk">
+                    <label for="sort-keys" title="Output the fields of each object with the keys in sorted order.">--sort-key</label>
+                  </li>
+                  <li>
+                    <input type="checkbox" id="raw-input" name="ri">
+                    <label for="raw-input" title="Don't parse the input as JSON. Instead, each line of text is passed to the filter as a string. If combined with --slurp, then the entire input is passed to the filter as a single long string.">--raw-input</label>
+                  </li>
+                  <li>
+                    <input type="checkbox" id="raw-output" name="ro">
+                    <label for="raw-output" title="With this option, if the filter's result is a string then it will be written directly to standard output rather than being formatted as a JSON string with quotes. This can be useful for making jq filters talk to non-JSON-based systems.">--raw-output</label>
+                  </li>
+                  <li>
+                    <input type="checkbox" id="slurp" name="s">
+                    <label for="slurp" title="Instead of running the filter for each JSON object in the input, read the entire input stream into a large array and run the filter just once.">--slurp</label>
+                  </li>
+                </ul>
+            </div>
+        </div>
+
+        <div id="input">
+            <label id="input-label" for="input-json-container">Input</label>
+            <div id="input-json-container"></div>
+        </div>
+
+        <div id="output">
+            <label id="output-label" for="output-json-container">Result</label>
+            <div id="output-json-container"></div>
+        </div>
+    </div>
+</body>
+
+</html>

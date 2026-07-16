@@ -1,0 +1,6 @@
+jq-playground.w-ilyas.site {
+	encode gzip
+	root * /home/ubuntu/thinkering/jq_playground
+	try_files {path} /index.html
+	file_server
+}

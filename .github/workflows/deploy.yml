@@ -1,0 +1,21 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    uses: Wadjinny/workflows/.github/workflows/deploy-static-html.yml@main
+    with:
+      source_dir: frontend
+    secrets: inherit
+
+  caddy:
+    needs: frontend
+    uses: Wadjinny/workflows/.github/workflows/deploy-caddy-site.yml@main
+    with:
+      caddy_file: Caddyfile
+      remote_file: /etc/caddy/sites/jq_playground.conf
+    secrets: inherit
