@@ -10,13 +10,6 @@ jq in your browser, without sending anything to any backend.">
     <link rel="icon" type="image/png" href="favicon.png">
     <title>Jq Playground</title>
     <script>
-      (function () {
-        var t = localStorage.getItem('theme');
-        if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches))
-          document.documentElement.classList.add('dark');
-      })();
-    </script>
-    <script>
       if('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/jq_offline/service_worker.js', { scope: '/jq_offline' })
           .then(function(registration) {
@@ -47,18 +40,35 @@ jq in your browser, without sending anything to any backend.">
       let monacoFilterEditor;
       let monacoOutputEditor;
       let CLI;
-      let isDarkMode = document.documentElement.classList.contains('dark');
+
+      const FLAG_IDS = ['compact-output', 'sort-keys', 'raw-input', 'raw-output', 'slurp'];
+
+      function currentFlags() {
+        const flags = {};
+        FLAG_IDS.forEach(id => { flags[id] = document.getElementById(id).checked; });
+        return flags;
+      }
 
       async function setup() {
         // Populate the form from the url parameters
         let params = (new URL(document.location)).searchParams;
 
+        let draft = {};
+        try { draft = JSON.parse(localStorage.getItem('jq-draft')) || {}; } catch (e) {}
+        window.initialInput = draft.input || '';
+
         let query = params.get('query');
         if (query) {
           // Store query to set in Monaco editor after initialization
           window.initialQuery = query;
+        } else {
+          // No shared link — restore the last session's draft
+          window.initialQuery = draft.query || '';
+          if (draft.flags) {
+            FLAG_IDS.forEach(id => { document.getElementById(id).checked = !!draft.flags[id]; });
+          }
         }
-        ['compact-output', 'sort-keys', 'raw-input', 'raw-output', 'slurp'].forEach(option => {
+        FLAG_IDS.forEach(option => {
           let p = params.get(option);
           if (p === 'true') {
             document.getElementById(option).checked = true;
@@ -72,15 +82,18 @@ jq in your browser, without sending anything to any backend.">
 
         let params = (new URL(document.location)).searchParams;
         let options = ["--monochrome-output"];
-        ['compact-output', 'sort-keys', 'raw-input', 'raw-output', 'slurp'].forEach(option => {
+        let activeFlags = 0;
+        FLAG_IDS.forEach(option => {
           let part = document.getElementById(option).checked;
           if (part) {
             params.set(option, true);
             options.push('--' + option);
+            activeFlags++;
           } else {
             params.delete(option);
           }
         });
+        document.getElementById('flag-count').textContent = activeFlags ? String(activeFlags) : '';
 
         // Update url query params with current query
         params.set('query', query);
@@ -96,6 +109,11 @@ jq in your browser, without sending anything to any backend.">
 
         let output = await CLI.exec("jq", options);
         monacoOutputEditor.setValue(output);
+
+        // Persist the working buffers so a reload restores them
+        try {
+          localStorage.setItem('jq-draft', JSON.stringify({ query, input: data, flags: currentFlags() }));
+        } catch (e) {}
       }
 
       // buffer and call the callback only after no activity for "interval": aka debounce
@@ -111,62 +129,199 @@ jq in your browser, without sending anything to any backend.">
 
       let delayedJq = debounce(jq, 400);
 
+      // Resizable panel grid: drag the 4px handles, arrow keys nudge, double-click resets
+      function initResizeHandles() {
+        const content = document.getElementById('content');
+        const DEFAULT_QUERY_H = 82, DEFAULT_COL_L = 0.5;
+        let saved = {};
+        try { saved = JSON.parse(localStorage.getItem('jq-layout')) || {}; } catch (e) {}
+        let queryH = saved.queryH || DEFAULT_QUERY_H;
+        let colL = saved.colL || DEFAULT_COL_L;
+
+        const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+        function apply() {
+          content.style.setProperty('--query-h', queryH + 'px');
+          content.style.setProperty('--col-l', colL + 'fr');
+          content.style.setProperty('--col-r', (1 - colL) + 'fr');
+        }
+
+        function persist() {
+          localStorage.setItem('jq-layout', JSON.stringify({ queryH: Math.round(queryH), colL: +colL.toFixed(4) }));
+        }
+
+        function attach(id, onDrag, onNudge, onReset) {
+          const handle = document.getElementById(id);
+          handle.addEventListener('pointerdown', e => {
+            e.preventDefault();
+            try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+            handle.classList.add('dragging');
+            const move = ev => { onDrag(ev, content.getBoundingClientRect()); apply(); };
+            const stop = () => {
+              handle.removeEventListener('pointermove', move);
+              handle.classList.remove('dragging');
+              persist();
+            };
+            handle.addEventListener('pointermove', move);
+            handle.addEventListener('lostpointercapture', stop, { once: true });
+            handle.addEventListener('pointerup', stop, { once: true });
+          });
+          handle.addEventListener('keydown', e => {
+            const delta = { ArrowUp: -1, ArrowLeft: -1, ArrowDown: 1, ArrowRight: 1 }[e.key];
+            if (!delta) return;
+            e.preventDefault();
+            onNudge(delta, content.getBoundingClientRect());
+            apply();
+            persist();
+          });
+          handle.addEventListener('dblclick', () => { onReset(); apply(); persist(); });
+        }
+
+        attach('row-handle',
+          (ev, rect) => { queryH = clamp(ev.clientY - rect.top, DEFAULT_QUERY_H, rect.height * 0.6); },
+          (delta, rect) => { queryH = clamp(queryH + delta * 16, DEFAULT_QUERY_H, rect.height * 0.6); },
+          () => { queryH = DEFAULT_QUERY_H; });
+
+        attach('col-handle',
+          (ev, rect) => { colL = clamp((ev.clientX - rect.left) / rect.width, 0.15, 0.85); },
+          (delta) => { colL = clamp(colL + delta * 0.05, 0.15, 0.85); },
+          () => { colL = DEFAULT_COL_L; });
+
+        apply();
+      }
+
       // Initialize Monaco editors after the page loads
       async function initMonacoEditors() {
         // Initialize Monaco editors
         require(['vs/editor/editor.main'], function() {
+          // jq language: tokens, editing pairs, and a vs-dark-based theme for them
+          monaco.languages.register({ id: 'jq' });
+
+          monaco.languages.setMonarchTokensProvider('jq', {
+            defaultToken: '',
+            keywords: [
+              'if', 'then', 'elif', 'else', 'end', 'as', 'def', 'reduce', 'foreach',
+              'try', 'catch', 'label', 'break', 'import', 'include', 'module',
+              'and', 'or', 'not'
+            ],
+            builtins: [
+              'abs', 'acos', 'add', 'all', 'any', 'ascii', 'ascii_downcase', 'ascii_upcase',
+              'asin', 'atan', 'builtins', 'capture', 'ceil', 'combinations', 'contains',
+              'cos', 'debug', 'del', 'delpaths', 'empty', 'endswith', 'env', 'error',
+              'exp', 'exp10', 'exp2', 'explode', 'fabs', 'first', 'flatten', 'floor',
+              'format', 'from_entries', 'fromdate', 'fromdateiso8601', 'fromjson',
+              'fromstream', 'getpath', 'gmtime', 'group_by', 'gsub', 'halt', 'halt_error',
+              'has', 'implode', 'in', 'index', 'indices', 'infinite', 'input',
+              'input_line_number', 'inputs', 'inside', 'isinfinite', 'isnan', 'isnormal',
+              'join', 'keys', 'keys_unsorted', 'last', 'leaf_paths', 'length', 'limit',
+              'localtime', 'log', 'log10', 'log2', 'ltrim', 'ltrimstr', 'map', 'map_values',
+              'match', 'max', 'max_by', 'min', 'min_by', 'mktime', 'nan', 'now', 'nth',
+              'path', 'paths', 'pick', 'pow', 'range', 'recurse', 'repeat', 'reverse',
+              'rindex', 'round', 'rtrim', 'rtrimstr', 'scan', 'select', 'setpath', 'sin',
+              'sort', 'sort_by', 'split', 'splits', 'sqrt', 'startswith', 'stderr',
+              'strflocaltime', 'strftime', 'strptime', 'sub', 'tan', 'test', 'to_entries',
+              'toarray', 'todate', 'todateiso8601', 'tojson', 'tonumber', 'tostream',
+              'tostring', 'transpose', 'trim', 'truncate_stream', 'type', 'unique',
+              'unique_by', 'until', 'utf8bytelength', 'values', 'walk', 'while', 'with_entries'
+            ],
+            tokenizer: {
+              root: [
+                [/#.*$/, 'comment'],
+                [/@\w+/, 'annotation'],
+                [/\$(__loc__|ENV|[A-Za-z_]\w*)/, 'variable'],
+                [/\.\.(?!\.)/, 'operator'],
+                [/\.[A-Za-z_]\w*/, 'field'],
+                [/"/, { token: 'string.quote', next: '@string' }],
+                [/\d+(\.\d+)?([eE][+-]?\d+)?/, 'number'],
+                [/[A-Za-z_]\w*/, { cases: { '@keywords': 'keyword', '@builtins': 'type', '@default': 'identifier' } }],
+                [/[{}()\[\]]/, '@brackets'],
+                [/\?\/\/|\/\/=|\/\/|\|=|==|!=|<=|>=|\+=|-=|\*=|\/=|%=|[|+\-*\/%=<>?;:,.]/, 'operator'],
+              ],
+              string: [
+                [/\\\(/, { token: 'delimiter.interpolation', next: '@interpolation' }],
+                [/[^"\\]+/, 'string'],
+                [/\\./, 'string.escape'],
+                [/"/, { token: 'string.quote', next: '@pop' }],
+              ],
+              // \(...) holds a full jq expression; count parens so we pop at the matching one
+              interpolation: [
+                [/\(/, { token: 'delimiter.parenthesis', next: '@parens' }],
+                [/\)/, { token: 'delimiter.interpolation', next: '@pop' }],
+                { include: 'root' },
+              ],
+              parens: [
+                [/\(/, { token: 'delimiter.parenthesis', next: '@push' }],
+                [/\)/, { token: 'delimiter.parenthesis', next: '@pop' }],
+                { include: 'root' },
+              ],
+            }
+          });
+
+          monaco.languages.setLanguageConfiguration('jq', {
+            comments: { lineComment: '#' },
+            brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+            autoClosingPairs: [
+              { open: '{', close: '}' },
+              { open: '[', close: ']' },
+              { open: '(', close: ')' },
+              { open: '"', close: '"', notIn: ['string'] },
+            ],
+            surroundingPairs: [
+              { open: '{', close: '}' },
+              { open: '[', close: ']' },
+              { open: '(', close: ')' },
+              { open: '"', close: '"' },
+            ],
+          });
+
+          // vs-dark plus explicit colors for the jq tokens; builtins reuse the teal data channel
+          monaco.editor.defineTheme('compact-dark', {
+            base: 'vs-dark',
+            inherit: true,
+            rules: [
+              { token: 'keyword.jq', foreground: 'c586c0' },
+              { token: 'type.jq', foreground: '4ec9b0' },
+              { token: 'field.jq', foreground: '9cdcfe' },
+              { token: 'variable.jq', foreground: '4fc1ff' },
+              { token: 'annotation.jq', foreground: 'dcdcaa' },
+              { token: 'string.jq', foreground: 'ce9178' },
+              { token: 'string.quote.jq', foreground: 'ce9178' },
+              { token: 'string.escape.jq', foreground: 'd7ba7d' },
+              { token: 'delimiter.interpolation.jq', foreground: 'dcdcaa' },
+              { token: 'number.jq', foreground: 'b5cea8' },
+              { token: 'comment.jq', foreground: '6a9955' },
+              { token: 'operator.jq', foreground: 'd4d4d4' },
+              { token: 'identifier.jq', foreground: 'd4d4d4' },
+            ],
+            colors: {}
+          });
+
           // Filter editor (jq query)
           monacoFilterEditor = monaco.editor.create(document.getElementById('filter-container'), {
             value: window.initialQuery || '',
-            language: 'plaintext',
+            language: 'jq',
             minimap: { enabled: false },
             lineNumbers: 'off',
             scrollBeyondLastLine: false,
             wordWrap: 'on',
             automaticLayout: true,
-            theme: isDarkMode ? 'vs-dark' : 'vs',
-            fontSize: 14,
-            padding: { top: 12, bottom: 12 },
+            theme: 'compact-dark',
+            fontSize: 13,
+            padding: { top: 9, bottom: 9 },
             scrollbar: {
               vertical: 'hidden',
               horizontal: 'hidden'
             }
           });
 
-          // Register a custom language for jq
-          monaco.languages.register({ id: 'jq' });
-          
-          // Define jq syntax highlighting
-          monaco.languages.setMonarchTokensProvider('jq', {
-            tokenizer: {
-              root: [
-                // Keywords
-                [/\b(if|then|else|elif|end|as|def|include|module|import|reduce|foreach|try|catch)\b/, 'keyword'],
-                // Operators
-                [/(\+|-|\*|\/|%|\||,|\.|;|:|\?|=|<|>|!)/, 'operator'],
-                // Numbers
-                [/\b\d+(\.\d+)?\b/, 'number'],
-                // Strings
-                [/"([^"\\]|\\.)*"/, 'string'],
-                // Comments
-                [/#.*$/, 'comment'],
-                // Functions
-                [/\b(map|select|has|contains|length|keys|to_entries|from_entries|with_entries|add|del|getpath|setpath|sort|sort_by|group_by|unique|unique_by|reverse|flatten|range|floor|ceil|round|sqrt|sin|cos|tan|asin|acos|atan|exp|log|pow|tonumber|tostring|type|join|split|sub|gsub|test|capture|scan|match|startswith|endswith|ltrimstr|rtrimstr|explode|implode|ascii_downcase|ascii_upcase|utf8bytelength|fromjson|tojson|format|strftime|strptime|now|gmtime|localtime|mktime|strflocaltime|strptime|todate|fromdate|todateiso8601|fromdateiso8601|todatejson|fromdatejson)\b/, 'function'],
-              ]
-            }
-          });
-          
-          // Set the language to jq
-          monaco.editor.setModelLanguage(monacoFilterEditor.getModel(), 'jq');
-
           // Input JSON editor
           monacoInputEditor = monaco.editor.create(document.getElementById('input-json-container'), {
-            value: '',
+            value: window.initialInput || '',
             language: 'json',
             minimap: { enabled: true },
             automaticLayout: true,
-            theme: isDarkMode ? 'vs-dark' : 'vs',
-            fontSize: 14,
+            theme: 'compact-dark',
+            fontSize: 13,
             padding: { top: 8, bottom: 8 }
           });
 
@@ -177,9 +332,15 @@ jq in your browser, without sending anything to any backend.">
             minimap: { enabled: true },
             readOnly: true,
             automaticLayout: true,
-            theme: isDarkMode ? 'vs-dark' : 'vs',
-            fontSize: 14,
+            theme: 'compact-dark',
+            fontSize: 13,
             padding: { top: 8, bottom: 8 }
+          });
+
+          // Monaco defaults to CRLF on Windows (and mirrors CRLF found in restored
+          // content), but jq's lexer rejects \r — force LF everywhere
+          [monacoFilterEditor, monacoInputEditor, monacoOutputEditor].forEach(editor => {
+            editor.getModel().setEOL(monaco.editor.EndOfLineSequence.LF);
           });
 
           // Add event listeners
@@ -187,57 +348,157 @@ jq in your browser, without sending anything to any backend.">
           monacoInputEditor.onDidChangeModelContent(delayedJq);
 
           // Add event listeners for checkboxes
-          document.getElementById("compact-output").addEventListener('input', jq);
-          document.getElementById("sort-keys").addEventListener('input', jq);
-          document.getElementById("raw-input").addEventListener('input', jq);
-          document.getElementById("raw-output").addEventListener('input', jq);
-          document.getElementById("slurp").addEventListener('input', jq);
+          FLAG_IDS.forEach(id => document.getElementById(id).addEventListener('input', jq));
 
           // Call jq the first time
           jq();
-          
-          // Set up theme toggle
-          document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
         });
-      }
-
-      // Function to toggle between dark and light themes
-      function toggleTheme() {
-        isDarkMode = !isDarkMode;
-        const theme = isDarkMode ? 'vs-dark' : 'vs';
-        
-        // Update editor themes
-        monaco.editor.setTheme(theme);
-        
-        // Update document theme
-        document.documentElement.classList.toggle('dark', isDarkMode);
-        
-        // Save preference
-        localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
       }
 
       // Initialize everything
       setup();
+      initResizeHandles();
       CLI = await new Aioli("jq/1.7");
+      document.getElementById('engine-status').textContent = 'jq 1.7 · wasm ready';
       await initMonacoEditors();
-      
+
       // Set up options popover toggle
       document.getElementById('options-toggle').addEventListener('click', function() {
         document.getElementById('options-popover').classList.toggle('hidden');
       });
-      
-      document.getElementById('close-options').addEventListener('click', function() {
-        document.getElementById('options-popover').classList.add('hidden');
-      });
-      
-      // Close popover when clicking outside
-      document.addEventListener('click', function(event) {
-        const popover = document.getElementById('options-popover');
-        const toggle = document.getElementById('options-toggle');
-        
-        if (!popover.contains(event.target) && event.target !== toggle && !toggle.contains(event.target)) {
-          popover.classList.add('hidden');
+
+      // Snapshots — named {query, input, flags} entries kept in localStorage
+      function readSaves() {
+        try { return JSON.parse(localStorage.getItem('jq-saves')) || []; } catch (e) { return []; }
+      }
+
+      function updateSavedCount() {
+        const n = readSaves().length;
+        document.getElementById('saved-count').textContent = n ? String(n) : '';
+      }
+
+      function loadSnapshot(snap) {
+        FLAG_IDS.forEach(id => { document.getElementById(id).checked = !!(snap.flags && snap.flags[id]); });
+        monacoInputEditor.setValue(snap.input || '');
+        monacoFilterEditor.setValue(snap.query || ''); // change listeners re-run jq
+      }
+
+      function renderSaves() {
+        const list = document.getElementById('saves-list');
+        list.textContent = '';
+        const saves = readSaves();
+        if (!saves.length) {
+          const li = document.createElement('li');
+          li.className = 'saves-empty';
+          li.textContent = 'no snapshots yet';
+          list.appendChild(li);
+          return;
         }
+        saves.forEach(snap => {
+          const li = document.createElement('li');
+          const meta = document.createElement('div');
+          meta.className = 'save-meta';
+          const name = document.createElement('span');
+          name.className = 'save-name';
+          name.textContent = snap.name;
+          const query = document.createElement('span');
+          query.className = 'save-query';
+          query.textContent = snap.query || '.';
+          meta.append(name, query);
+          const date = document.createElement('span');
+          date.className = 'save-date';
+          date.textContent = new Date(snap.savedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+          const del = document.createElement('button');
+          del.className = 'save-delete';
+          del.title = 'Delete snapshot';
+          del.textContent = '✕';
+          del.addEventListener('click', ev => {
+            ev.stopPropagation();
+            localStorage.setItem('jq-saves', JSON.stringify(readSaves().filter(s => s.id !== snap.id)));
+            renderSaves();
+            updateSavedCount();
+          });
+          li.append(meta, date, del);
+          li.addEventListener('click', () => {
+            loadSnapshot(snap);
+            document.getElementById('saved-popover').classList.add('hidden');
+          });
+          list.appendChild(li);
+        });
+      }
+
+      function saveSnapshot() {
+        const nameEl = document.getElementById('save-name');
+        const hint = document.getElementById('save-hint');
+        const name = nameEl.value.trim() || 'snapshot';
+        const entry = {
+          id: Math.random().toString(36).slice(2),
+          name,
+          query: monacoFilterEditor.getValue(),
+          input: monacoInputEditor.getValue(),
+          flags: currentFlags(),
+          savedAt: Date.now()
+        };
+        const saves = readSaves().filter(s => s.name !== name); // same name overwrites
+        saves.unshift(entry);
+        try {
+          localStorage.setItem('jq-saves', JSON.stringify(saves));
+        } catch (e) {
+          hint.textContent = 'storage full — could not save';
+          hint.classList.add('error');
+          return;
+        }
+        hint.textContent = '';
+        hint.classList.remove('error');
+        nameEl.value = '';
+        updateSavedCount();
+        document.getElementById('save-popover').classList.add('hidden');
+      }
+
+      document.getElementById('save-btn').addEventListener('click', function() {
+        const pop = document.getElementById('save-popover');
+        document.getElementById('saved-popover').classList.add('hidden');
+        pop.classList.toggle('hidden');
+        if (!pop.classList.contains('hidden')) {
+          const nameEl = document.getElementById('save-name');
+          if (!nameEl.value) {
+            const q = monacoFilterEditor ? monacoFilterEditor.getValue().trim().replace(/\s+/g, ' ') : '';
+            nameEl.value = q ? q.slice(0, 32) : 'snapshot';
+          }
+          nameEl.focus();
+          nameEl.select();
+        }
+      });
+
+      document.getElementById('save-confirm').addEventListener('click', saveSnapshot);
+
+      document.getElementById('save-name').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') saveSnapshot();
+        if (e.key === 'Escape') document.getElementById('save-popover').classList.add('hidden');
+      });
+
+      document.getElementById('saved-btn').addEventListener('click', function() {
+        const pop = document.getElementById('saved-popover');
+        document.getElementById('save-popover').classList.add('hidden');
+        renderSaves();
+        pop.classList.toggle('hidden');
+      });
+
+      updateSavedCount();
+
+      // Every popover: ✕ closes it, clicking outside it (and its toggle) closes it
+      document.querySelectorAll('.popover-close').forEach(btn => {
+        btn.addEventListener('click', () => btn.closest('.popover').classList.add('hidden'));
+      });
+
+      document.addEventListener('click', function(event) {
+        [['options-popover', 'options-toggle'], ['save-popover', 'save-btn'], ['saved-popover', 'saved-btn']].forEach(([popId, toggleId]) => {
+          const popover = document.getElementById(popId);
+          const toggle = document.getElementById(toggleId);
+          if (!popover.contains(event.target) && !toggle.contains(event.target)) {
+            popover.classList.add('hidden');
+          }
+        });
       });
     </script>
 </head>
@@ -245,91 +506,102 @@ jq in your browser, without sending anything to any backend.">
 <body>
     <div class="app">
         <header class="topbar">
-            <div class="logo" aria-hidden="true">jq</div>
-            <div class="brand">
-                <h1>Jq Playground</h1>
-                <p>Full jq in your browser — nothing leaves this tab</p>
-            </div>
-            <div class="topbar-actions">
-                <a class="btn ghost" href="https://jqlang.github.io/jq/manual/v1.7/" target="_blank" rel="noopener">
-                    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+            <h1>Jq Playground</h1>
+            <span id="engine-status">jq 1.7 · loading wasm…</span>
+            <span class="topbar-note">Nothing leaves this tab</span>
+            <div class="toolbar">
+                <div class="save-group">
+                    <button id="save-btn" class="toolbar-btn" title="Save the current input and expression to this browser">Save</button>
+                    <button id="saved-btn" class="toolbar-btn" title="Saved snapshots">Saved<span id="saved-count"></span></button>
+                    <div id="save-popover" class="popover hidden">
+                        <div class="popover-header">
+                            <p>Save Snapshot</p>
+                            <button class="popover-close" title="Close" aria-label="Close save dialog">✕</button>
+                        </div>
+                        <div class="save-form">
+                            <input id="save-name" type="text" placeholder="snapshot name" spellcheck="false" maxlength="64" aria-label="Snapshot name">
+                            <button id="save-confirm" class="primary-btn">Save</button>
+                        </div>
+                        <div id="save-hint" class="popover-hint"></div>
+                    </div>
+                    <div id="saved-popover" class="popover hidden">
+                        <div class="popover-header">
+                            <p>Saved Snapshots</p>
+                            <button class="popover-close" title="Close" aria-label="Close saved list">✕</button>
+                        </div>
+                        <ul id="saves-list"></ul>
+                    </div>
+                </div>
+                <a class="toolbar-btn" href="https://jqlang.github.io/jq/manual/v1.7/" target="_blank" rel="noopener">
+                    <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M14 3h7v7"/>
                         <path d="M10 14L21 3"/>
                         <path d="M21 14v7H3V3h7"/>
                     </svg>
                     <span>Manual</span>
                 </a>
-                <button id="theme-toggle" class="icon-btn" title="Toggle dark/light mode" aria-label="Toggle theme">
-                    <svg class="sun" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                        <circle cx="12" cy="12" r="4"/>
-                        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
-                    </svg>
-                    <svg class="moon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M21 14.5A8.5 8.5 0 0 1 9.5 3 7 7 0 1 0 21 14.5z"/>
-                    </svg>
-                </button>
             </div>
         </header>
 
         <div id="content">
             <div id="query" class="panel">
-                <div class="panel-label">
-                    Query
-                    <span class="hint">jq filter</span>
-                </div>
-                <div id="filter-wrapper">
-                    <div id="filter-container"></div>
-                    <button id="options-toggle" title="Show/Hide Options" aria-label="Options">
-                        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                            <circle cx="12" cy="12" r="3"/>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                        </svg>
-                    </button>
-                </div>
-                <div id="options-popover" class="hidden">
-                    <div class="popover-header">
-                        <p>Options</p>
-                        <button id="close-options" title="Close Options" aria-label="Close options">✕</button>
+                <div class="panel-header">
+                    <div class="panel-title">Query <span class="hint">jq filter</span></div>
+                    <button id="options-toggle" class="micro-btn" title="Toggle jq command-line flags" aria-label="Options">Flags<span id="flag-count"></span></button>
+                    <div id="options-popover" class="popover hidden">
+                        <div class="popover-header">
+                            <p>Options</p>
+                            <button class="popover-close" title="Close Options" aria-label="Close options">✕</button>
+                        </div>
+                        <ul id="options">
+                          <li>
+                            <input type="checkbox" id="compact-output" name="co">
+                            <label for="compact-output" title="By default, jq pretty-prints JSON output. Using this option will result in more compact output by instead putting each JSON object on a single line.">--compact-output</label>
+                          </li>
+                          <li>
+                            <input type="checkbox" id="sort-keys" name="sk">
+                            <label for="sort-keys" title="Output the fields of each object with the keys in sorted order.">--sort-key</label>
+                          </li>
+                          <li>
+                            <input type="checkbox" id="raw-input" name="ri">
+                            <label for="raw-input" title="Don't parse the input as JSON. Instead, each line of text is passed to the filter as a string. If combined with --slurp, then the entire input is passed to the filter as a single long string.">--raw-input</label>
+                          </li>
+                          <li>
+                            <input type="checkbox" id="raw-output" name="ro">
+                            <label for="raw-output" title="With this option, if the filter's result is a string then it will be written directly to standard output rather than being formatted as a JSON string with quotes. This can be useful for making jq filters talk to non-JSON-based systems.">--raw-output</label>
+                          </li>
+                          <li>
+                            <input type="checkbox" id="slurp" name="s">
+                            <label for="slurp" title="Instead of running the filter for each JSON object in the input, read the entire input stream into a large array and run the filter just once.">--slurp</label>
+                          </li>
+                        </ul>
                     </div>
-                    <ul id="options">
-                      <li>
-                        <input type="checkbox" id="compact-output" name="co">
-                        <label for="compact-output" title="By default, jq pretty-prints JSON output. Using this option will result in more compact output by instead putting each JSON object on a single line.">--compact-output</label>
-                      </li>
-                      <li>
-                        <input type="checkbox" id="sort-keys" name="sk">
-                        <label for="sort-keys" title="Output the fields of each object with the keys in sorted order.">--sort-key</label>
-                      </li>
-                      <li>
-                        <input type="checkbox" id="raw-input" name="ri">
-                        <label for="raw-input" title="Don't parse the input as JSON. Instead, each line of text is passed to the filter as a string. If combined with --slurp, then the entire input is passed to the filter as a single long string.">--raw-input</label>
-                      </li>
-                      <li>
-                        <input type="checkbox" id="raw-output" name="ro">
-                        <label for="raw-output" title="With this option, if the filter's result is a string then it will be written directly to standard output rather than being formatted as a JSON string with quotes. This can be useful for making jq filters talk to non-JSON-based systems.">--raw-output</label>
-                      </li>
-                      <li>
-                        <input type="checkbox" id="slurp" name="s">
-                        <label for="slurp" title="Instead of running the filter for each JSON object in the input, read the entire input stream into a large array and run the filter just once.">--slurp</label>
-                      </li>
-                    </ul>
+                </div>
+                <div class="panel-body">
+                    <div id="filter-container"></div>
                 </div>
             </div>
+
+            <div id="row-handle" class="resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize query panel" tabindex="0"></div>
 
             <div id="input" class="panel">
-                <div class="panel-label">
-                    Input
-                    <span class="hint">JSON</span>
+                <div class="panel-header">
+                    <div class="panel-title">Input <span class="hint">json</span></div>
                 </div>
-                <div id="input-json-container"></div>
+                <div class="panel-body">
+                    <div id="input-json-container"></div>
+                </div>
             </div>
 
+            <div id="col-handle" class="resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize input and result panels" tabindex="0"></div>
+
             <div id="output" class="panel">
-                <div class="panel-label">
-                    Result
-                    <span class="hint">output</span>
+                <div class="panel-header">
+                    <div class="panel-title">Result <span class="hint">stdout</span></div>
                 </div>
-                <div id="output-json-container"></div>
+                <div class="panel-body">
+                    <div id="output-json-container"></div>
+                </div>
             </div>
         </div>
     </div>
