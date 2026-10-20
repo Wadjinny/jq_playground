@@ -1,4 +1,4 @@
-jq-playground.w-ilyas.site {
+jq-playground.w-ilyas.ink, jq-playground.w-ilyas.site {
 	encode gzip
 	root * /home/ubuntu/thinkering/jq_playground
 	try_files {path} /index.html
